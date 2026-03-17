@@ -1,0 +1,201 @@
+name: Auto PR Description with AI
+
+on:
+  pull_request:
+    types: [opened]
+
+jobs:
+  generate-description:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR Information
+        id: pr-info
+        run: |
+          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
+          echo "body=${{ github.event.pull_request.body }}" >> $GITHUB_OUTPUT
+          echo "author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
+          echo "branch=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
+          echo "base_branch=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
+
+      - name: Get Commit Messages
+        id: commits
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          commits=$(git log --pretty=format:"%h %s (%an)" origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          echo "commits<<EOF" >> $GITHUB_OUTPUT
+          echo "$commits" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Get Changed Files
+        id: files
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          files=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          echo "files<<EOF" >> $GITHUB_OUTPUT
+          echo "$files" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate File Impact Summary
+        id: impact
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          
+          # Count files by type
+          added=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^A" | wc -l)
+          modified=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^M" | wc -l)
+          deleted=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^D" | wc -l)
+          renamed=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^R" | wc -l)
+          
+          # Get stats
+          stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          
+          # Identify key file types
+          file_types=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '\.(js|ts|tsx|jsx|py|java|go|rb|php|cs)$' | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -5)
+          
+          # Detect tests
+          tests=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -i test | wc -l)
+          
+          # Detect config files
+          configs=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '(package\.json|requirements\.txt|Dockerfile|\.yml|\.yaml|\.json|\.toml|\.config\.)' | wc -l)
+          
+          echo "added=$added" >> $GITHUB_OUTPUT
+          echo "modified=$modified" >> $GITHUB_OUTPUT
+          echo "deleted=$deleted" >> $GITHUB_OUTPUT
+          echo "renamed=$renamed" >> $GITHUB_OUTPUT
+          echo "stats=$stats" >> $GITHUB_OUTPUT
+          echo "tests=$tests" >> $GITHUB_OUTPUT
+          echo "configs=$configs" >> $GITHUB_OUTPUT
+          
+          echo "file_types<<EOF" >> $GITHUB_OUTPUT
+          echo "$file_types" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Generate AI Description
+        id: ai-desc
+        env:
+          JUSPAY_API_KEY: ${{ secrets.JUSPAY_API_KEY }}
+        run: |
+          # Prepare the prompt
+          cat > /tmp/prompt.txt << 'PROMPT_EOF'
+          You are a senior software engineer reviewing a pull request. Generate a comprehensive PR description based on the following information.
+
+          PR Title: ${{ steps.pr-info.outputs.title }}
+          Branch: ${{ steps.pr-info.outputs.branch }}
+          Target Branch: ${{ steps.pr-info.outputs.base_branch }}
+
+          Commits:
+          ${{ steps.commits.outputs.commits }}
+
+          Changed Files Summary:
+          - Added: ${{ steps.impact.outputs.added }} files
+          - Modified: ${{ steps.impact.outputs.modified }} files
+          - Deleted: ${{ steps.impact.outputs.deleted }} files
+          - Renamed: ${{ steps.impact.outputs.renamed }} files
+          - Test files: ${{ steps.impact.outputs.tests }}
+          - Config files: ${{ steps.impact.outputs.configs }}
+
+          File Statistics: ${{ steps.impact.outputs.stats }}
+
+          File List:
+          ${{ steps.files.outputs.files }}
+
+          Generate a PR description with the following sections:
+
+          ## Summary
+          Brief overview of what this PR accomplishes (2-3 sentences)
+
+          ## Changes Made
+          Bullet points of key changes
+
+          ## Files Changed
+          Categorize changes (New Features, Bug Fixes, Refactoring, Tests, Config/Build, Documentation)
+
+          ## Impact Assessment
+          - Risk Level: (Low/Medium/High) with brief justification
+          - Areas Affected: (list components/modules affected)
+          - Breaking Changes: (Yes/No - explain if yes)
+
+          ## Testing
+          What testing was done
+
+          ## Checklist
+          - [ ] Code follows project style guidelines
+          - [ ] Self-review completed
+          - [ ] Changes are well-documented
+          - [ ] Tests added/updated
+
+          Format as clean Markdown without code block wrappers.
+          PROMPT_EOF
+
+          # Call Juspay API
+          prompt_content=$(cat /tmp/prompt.txt | jq -Rs '.')
+          
+          response=$(curl -s -X POST "https://grid.ai.juspay.net/v1/chat/completions" \
+            -H "Authorization: Bearer $JUSPAY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"model\": \"open-large\",
+              \"messages\": [
+                {
+                  \"role\": \"system\",
+                  \"content\": \"You are a helpful assistant that generates clear, concise pull request descriptions.\"
+                },
+                {
+                  \"role\": \"user\",
+                  \"content\": $prompt_content
+                }
+              ],
+              \"temperature\": 0.3,
+              \"max_tokens\": 2000
+            }")
+
+          # Extract description from response (adjust based on your API response format)
+          description=$(echo "$response" | jq -r '.choices[0].message.content // .response // .text' 2>/dev/null || echo "")
+          
+          # Fallback if AI fails
+          if [ -z "$description" ] || [ "$description" = "null" ]; then
+            description="## Summary\nThis PR includes changes to ${{ steps.impact.outputs.modified }} files with ${{ steps.impact.outputs.stats }}.\n\n## Changes\n${{ steps.commits.outputs.commits }}\n\n*Auto-generated description - AI model unavailable*"
+          fi
+
+          # Save to output
+          echo "description<<EOF" >> $GITHUB_OUTPUT
+          echo "$description" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Update PR Description
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const description = `${{ steps.ai-desc.outputs.description }}`;
+            
+            // Get current description
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number
+            });
+            
+            // Combine with existing description if it has content
+            let finalDescription = description;
+            if (pr.body && pr.body.trim() !== '' && !pr.body.includes('Auto-generated')) {
+              finalDescription = `## Original Description\n\n${pr.body}\n\n---\n\n${description}`;
+            }
+            
+            // Update PR
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.issue.number,
+              body: finalDescription
+            });
+            
+            console.log('PR description updated successfully');

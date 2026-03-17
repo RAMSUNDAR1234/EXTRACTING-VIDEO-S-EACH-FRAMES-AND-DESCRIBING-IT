@@ -1,0 +1,156 @@
+name: AI Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  ai-code-review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+    
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get PR Diff
+        id: diff
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          
+          # Get the full diff
+          full_diff=$(git diff origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          
+          # Save to file (handle large diffs)
+          echo "$full_diff" > /tmp/pr_diff.txt
+          
+          # Get summary stats
+          diff_stat=$(git diff --stat origin/${{ github.event.pull_request.base.ref }}..HEAD)
+          
+          echo "diff_size=$(wc -c < /tmp/pr_diff.txt)" >> $GITHUB_OUTPUT
+          echo "diff_stat<<EOF" >> $GITHUB_OUTPUT
+          echo "$diff_stat" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Get Changed Files Content
+        id: files-content
+        run: |
+          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          
+          # Get list of changed files
+          changed_files=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '\.(js|ts|tsx|jsx|py|java|go|rb|php|cs|c|cpp|h|hpp|rs|swift|kt|scala)$' || true)
+          
+          # Create file content summary (first 50 lines of each new/modified file)
+          summary=""
+          for file in $changed_files; do
+            if [ -f "$file" ]; then
+              summary="${summary}\\n=== $file ===\\n"
+              # Get first 50 lines to understand context
+              head_content=$(head -50 "$file" 2>/dev/null || echo "Binary or unreadable file")
+              summary="${summary}${head_content}\\n"
+            fi
+          done
+          
+          echo "files_summary<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$summary" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: AI Code Review
+        id: ai-review
+        env:
+          JUSPAY_API_KEY: ${{ secrets.JUSPAY_API_KEY }}
+        run: |
+          # Prepare chunks if diff is too large (API limits)
+          max_diff_size=15000
+          diff_content=""
+          
+          if [ ${{ steps.diff.outputs.diff_size }} -gt $max_diff_size ]; then
+            diff_content=$(head -c $max_diff_size /tmp/pr_diff.txt)
+            diff_content="${diff_content}\\n\\n[Diff truncated - showing first ${max_diff_size} characters]"
+          else
+            diff_content=$(cat /tmp/pr_diff.txt)
+          fi
+          
+          # Build JSON payload
+          jq -n \
+            --arg diff "$diff_content" \
+            --arg files "${{ steps.files-content.outputs.files_summary }}" \
+            --arg title "${{ github.event.pull_request.title }}" \
+            --arg body "${{ github.event.pull_request.body }}" \
+            --arg stat "${{ steps.diff.outputs.diff_stat }}" \
+            '{
+              model: "open-large",
+              messages: [
+                {
+                  role: "system",
+                  content: "You are an expert senior software engineer conducting a thorough code review. Provide actionable, constructive feedback focused on code quality, best practices, potential bugs, security issues, and architectural concerns. Be concise but thorough."
+                },
+                {
+                  role: "user",
+                  content: "Please review this pull request. PR Title: \($title) PR Description: \($body) Diff Statistics: \($stat) Changed Files Overview: \($files) Code Diff: \($diff) Please provide a structured code review with: ## Overall Assessment (Ready to merge / Minor suggestions / Needs changes / Major concerns), ## Code Quality, ## Best Practices, ## Potential Issues, ## Suggestions, ## Testing. Format in Markdown."
+                }
+              ],
+              temperature: 0.2,
+              max_tokens: 3000
+            }' > /tmp/payload.json
+
+          # Call Juspay API
+          response=$(curl -s -X POST "https://grid.ai.juspay.net/v1/chat/completions" \
+            -H "Authorization: Bearer $JUSPAY_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/payload.json)
+
+          # Extract review
+          review=$(echo "$response" | jq -r '.choices[0].message.content // .response // .text' 2>/dev/null || echo "")
+          
+          # Fallback
+          if [ -z "$review" ] || [ "$review" = "null" ]; then
+            review="## AI Review\\n\\nUnable to generate AI review at this time. Please review manually.\\n\\n**Diff Stats:**\\n\`\`\`\\n${{ steps.diff.outputs.diff_stat }}\\n\`\`\`"
+          fi
+
+          # Save review
+          echo "review<<EOF" >> $GITHUB_OUTPUT
+          echo "$review" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Post AI Review Comment
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const review = `${{ steps.ai-review.outputs.review }}`;
+            
+            // Find existing AI review comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            
+            const aiReviewPrefix = "## 🤖 AI Code Review";
+            const existingAiReview = comments.find(c => c.body.includes(aiReviewPrefix));
+            
+            const reviewBody = `${aiReviewPrefix}\n\n*Generated for commit \`${{ github.event.pull_request.head.sha }}\`*\n\n${review}`;
+            
+            if (existingAiReview) {
+              // Update existing review
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existingAiReview.id,
+                body: reviewBody
+              });
+              console.log('Updated existing AI review');
+            } else {
+              // Create new review
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: reviewBody
+              });
+              console.log('Posted new AI review');
+            }
