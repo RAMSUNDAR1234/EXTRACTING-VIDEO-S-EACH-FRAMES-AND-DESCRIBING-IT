@@ -20,16 +20,20 @@ jobs:
       - name: Get PR Info
         id: info
         run: |
-          echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-          echo "branch=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
-          echo "base=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
           git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
           git log --pretty=format:"%h %s" origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/commits.txt
           git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/files.txt
-          echo "added=$(grep -c "^A" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
-          echo "modified=$(grep -c "^M" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
-          echo "deleted=$(grep -c "^D" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
-          echo "stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD)" >> $GITHUB_OUTPUT
+          echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
+          echo "branch=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
+          echo "base=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
+          added=$(grep -c "^A" /tmp/files.txt 2>/dev/null || echo "0")
+          modified=$(grep -c "^M" /tmp/files.txt 2>/dev/null || echo "0")
+          deleted=$(grep -c "^D" /tmp/files.txt 2>/dev/null || echo "0")
+          stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD | tr -d '\n')
+          echo "added=$added" >> "$GITHUB_OUTPUT"
+          echo "modified=$modified" >> "$GITHUB_OUTPUT"
+          echo "deleted=$deleted" >> "$GITHUB_OUTPUT"
+          echo "stats=$stats" >> "$GITHUB_OUTPUT"
 
       - name: Run AI Script
         env:
