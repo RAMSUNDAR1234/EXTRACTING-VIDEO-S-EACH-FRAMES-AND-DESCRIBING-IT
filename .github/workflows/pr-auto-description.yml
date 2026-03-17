@@ -17,154 +17,50 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get PR Information
-        id: pr-info
+      - name: Get PR Info
+        id: info
         run: |
           echo "title=${{ github.event.pull_request.title }}" >> $GITHUB_OUTPUT
-          echo "author=${{ github.event.pull_request.user.login }}" >> $GITHUB_OUTPUT
           echo "branch=${{ github.event.pull_request.head.ref }}" >> $GITHUB_OUTPUT
-          echo "base_branch=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
-
-      - name: Get Commit Messages
-        id: commits
-        run: |
+          echo "base=${{ github.event.pull_request.base.ref }}" >> $GITHUB_OUTPUT
           git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
-          git log --pretty=format:"%h %s (%an)" origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/commits.txt
-
-      - name: Get Changed Files
-        id: files
-        run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
+          git log --pretty=format:"%h %s" origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/commits.txt
           git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/files.txt
+          echo "added=$(grep -c "^A" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
+          echo "modified=$(grep -c "^M" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
+          echo "deleted=$(grep -c "^D" /tmp/files.txt || echo 0)" >> $GITHUB_OUTPUT
+          echo "stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD)" >> $GITHUB_OUTPUT
 
-      - name: Generate File Impact Summary
-        id: impact
-        run: |
-          git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
-          added=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^A" | wc -l)
-          modified=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^M" | wc -l)
-          deleted=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^D" | wc -l)
-          renamed=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^R" | wc -l)
-          stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD)
-          tests=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -i test | wc -l)
-          configs=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '(package\.json|requirements\.txt|Dockerfile|\.yml|\.yaml|\.json|\.toml)' | wc -l)
-          echo "added=$added" >> $GITHUB_OUTPUT
-          echo "modified=$modified" >> $GITHUB_OUTPUT
-          echo "deleted=$deleted" >> $GITHUB_OUTPUT
-          echo "renamed=$renamed" >> $GITHUB_OUTPUT
-          echo "stats=$stats" >> $GITHUB_OUTPUT
-          echo "tests=$tests" >> $GITHUB_OUTPUT
-          echo "configs=$configs" >> $GITHUB_OUTPUT
-
-      - name: Generate AI Description
-        id: ai-desc
+      - name: Run AI Script
         env:
           JUSPAY_API_KEY: ${{ secrets.JUSPAY_API_KEY }}
-        run: |
-          # Create Python script file
-          cat > /tmp/gen_desc.py << 'SCRIPT_END'
-import os
-import json
-import urllib.request
+          PR_TITLE: ${{ steps.info.outputs.title }}
+          PR_BRANCH: ${{ steps.info.outputs.branch }}
+          BASE_BRANCH: ${{ steps.info.outputs.base }}
+          ADDED: ${{ steps.info.outputs.added }}
+          MODIFIED: ${{ steps.info.outputs.modified }}
+          DELETED: ${{ steps.info.outputs.deleted }}
+          STATS: ${{ steps.info.outputs.stats }}
+        run: python3 .github/scripts/generate_pr_description.py
 
-api_key = os.environ['JUSPAY_API_KEY']
-pr_title = os.environ.get('PR_TITLE', '')
-pr_branch = os.environ.get('PR_BRANCH', '')
-base_branch = os.environ.get('BASE_BRANCH', '')
-added = os.environ.get('ADDED', '0')
-modified = os.environ.get('MODIFIED', '0')
-deleted = os.environ.get('DELETED', '0')
-renamed = os.environ.get('RENAMED', '0')
-stats = os.environ.get('STATS', '')
-tests = os.environ.get('TESTS', '0')
-configs = os.environ.get('CONFIGS', '0')
-
-with open('/tmp/commits.txt', 'r') as f:
-    commits = f.read()
-
-with open('/tmp/files.txt', 'r') as f:
-    files = f.read()
-
-prompt = f"""You are a senior software engineer reviewing a pull request. Generate a comprehensive PR description.
-
-PR Title: {pr_title}
-Branch: {pr_branch} -> {base_branch}
-
-Changed Files: {added} added, {modified} modified, {deleted} deleted, {renamed} renamed
-Tests: {tests}, Configs: {configs}
-Stats: {stats}
-
-Commits:
-{commits}
-
-Files:
-{files}
-
-Generate PR description with: Summary, Changes Made, Files Changed, Impact Assessment, Testing, Checklist.
-Format as clean Markdown."""
-
-data = {
-    "model": "open-large",
-    "messages": [
-        {"role": "system", "content": "You are a helpful assistant that generates clear, concise pull request descriptions."},
-        {"role": "user", "content": prompt}
-    ],
-    "temperature": 0.3,
-    "max_tokens": 2000
-}
-
-req = urllib.request.Request(
-    "https://grid.ai.juspay.net/v1/chat/completions",
-    data=json.dumps(data).encode(),
-    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-    method='POST'
-)
-
-try:
-    with urllib.request.urlopen(req) as resp:
-        result = json.loads(resp.read().decode())
-        description = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-        if not description:
-            raise Exception("Empty response")
-except Exception as e:
-    description = f"## Summary\nThis PR includes changes to {modified} files.\n\n## Changes\n{commits}\n\n*AI unavailable: {str(e)}*"
-
-with open('/tmp/ai_description.txt', 'w') as f:
-    f.write(description)
-SCRIPT_END
-          # Run the script
-          python3 /tmp/gen_desc.py
-        env:
-          PR_TITLE: ${{ steps.pr-info.outputs.title }}
-          PR_BRANCH: ${{ steps.pr-info.outputs.branch }}
-          BASE_BRANCH: ${{ steps.pr-info.outputs.base_branch }}
-          ADDED: ${{ steps.impact.outputs.added }}
-          MODIFIED: ${{ steps.impact.outputs.modified }}
-          DELETED: ${{ steps.impact.outputs.deleted }}
-          RENAMED: ${{ steps.impact.outputs.renamed }}
-          STATS: ${{ steps.impact.outputs.stats }}
-          TESTS: ${{ steps.impact.outputs.tests }}
-          CONFIGS: ${{ steps.impact.outputs.configs }}
-
-      - name: Update PR Description
+      - name: Update PR
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const description = fs.readFileSync('/tmp/ai_description.txt', 'utf8');
+            const desc = fs.readFileSync('/tmp/ai_description.txt', 'utf8');
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number
             });
-            let finalDescription = description;
-            if (pr.body && pr.body.trim() !== '' && !pr.body.includes('Auto-generated')) {
-              finalDescription = '## Original Description\n\n' + pr.body + '\n\n---\n\n' + description;
+            let body = desc;
+            if (pr.body && pr.body.trim() && !pr.body.includes('Auto-generated')) {
+              body = '## Original\n\n' + pr.body + '\n\n---\n\n' + desc;
             }
             await github.rest.pulls.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
-              body: finalDescription
+              body: body
             });
-            console.log('PR description updated successfully');
