@@ -21,19 +21,19 @@ jobs:
         id: info
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
-          git log --pretty=format:"%h %s" origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/commits.txt
-          git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/files.txt
+          git log --pretty=format:"%h %s" origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/commits.txt || echo "" > /tmp/commits.txt
+          git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/files.txt || echo "" > /tmp/files.txt
+          
+          ADDED=$(grep "^A" /tmp/files.txt 2>/dev/null | wc -l)
+          MODIFIED=$(grep "^M" /tmp/files.txt 2>/dev/null | wc -l)
+          DELETED=$(grep "^D" /tmp/files.txt 2>/dev/null | wc -l)
+          
           echo "title=${{ github.event.pull_request.title }}" >> "$GITHUB_OUTPUT"
           echo "branch=${{ github.event.pull_request.head.ref }}" >> "$GITHUB_OUTPUT"
           echo "base=${{ github.event.pull_request.base.ref }}" >> "$GITHUB_OUTPUT"
-          added=$(grep -c "^A" /tmp/files.txt 2>/dev/null || echo "0")
-          modified=$(grep -c "^M" /tmp/files.txt 2>/dev/null || echo "0")
-          deleted=$(grep -c "^D" /tmp/files.txt 2>/dev/null || echo "0")
-          stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD | tr -d '\n')
-          echo "added=$added" >> "$GITHUB_OUTPUT"
-          echo "modified=$modified" >> "$GITHUB_OUTPUT"
-          echo "deleted=$deleted" >> "$GITHUB_OUTPUT"
-          echo "stats=$stats" >> "$GITHUB_OUTPUT"
+          echo "added=$ADDED" >> "$GITHUB_OUTPUT"
+          echo "modified=$MODIFIED" >> "$GITHUB_OUTPUT"
+          echo "deleted=$DELETED" >> "$GITHUB_OUTPUT"
 
       - name: Run AI Script
         env:
@@ -44,7 +44,6 @@ jobs:
           ADDED: ${{ steps.info.outputs.added }}
           MODIFIED: ${{ steps.info.outputs.modified }}
           DELETED: ${{ steps.info.outputs.deleted }}
-          STATS: ${{ steps.info.outputs.stats }}
         run: python3 .github/scripts/generate_pr_description.py
 
       - name: Update PR
