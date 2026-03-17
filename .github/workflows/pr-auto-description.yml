@@ -48,25 +48,13 @@ jobs:
         id: impact
         run: |
           git fetch origin ${{ github.event.pull_request.base.ref }} --depth=100
-          
-          # Count files by type
           added=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^A" | wc -l)
           modified=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^M" | wc -l)
           deleted=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^D" | wc -l)
           renamed=$(git diff --name-status origin/${{ github.event.pull_request.base.ref }}..HEAD | grep "^R" | wc -l)
-          
-          # Get stats
           stats=$(git diff --shortstat origin/${{ github.event.pull_request.base.ref }}..HEAD)
-          
-          # Identify key file types
-          file_types=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '\.(js|ts|tsx|jsx|py|java|go|rb|php|cs)$' | sed 's/.*\.//' | sort | uniq -c | sort -rn | head -5)
-          
-          # Detect tests
           tests=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -i test | wc -l)
-          
-          # Detect config files
           configs=$(git diff --name-only origin/${{ github.event.pull_request.base.ref }}..HEAD | grep -E '(package\.json|requirements\.txt|Dockerfile|\.yml|\.yaml|\.json|\.toml|\.config\.)' | wc -l)
-          
           echo "added=$added" >> $GITHUB_OUTPUT
           echo "modified=$modified" >> $GITHUB_OUTPUT
           echo "deleted=$deleted" >> $GITHUB_OUTPUT
@@ -74,128 +62,91 @@ jobs:
           echo "stats=$stats" >> $GITHUB_OUTPUT
           echo "tests=$tests" >> $GITHUB_OUTPUT
           echo "configs=$configs" >> $GITHUB_OUTPUT
-          
-          echo "file_types<<EOF" >> $GITHUB_OUTPUT
-          echo "$file_types" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Generate AI Description
         id: ai-desc
         env:
           JUSPAY_API_KEY: ${{ secrets.JUSPAY_API_KEY }}
+          PR_TITLE: ${{ steps.pr-info.outputs.title }}
+          PR_BRANCH: ${{ steps.pr-info.outputs.branch }}
+          BASE_BRANCH: ${{ steps.pr-info.outputs.base_branch }}
+          COMMITS: ${{ steps.commits.outputs.commits }}
+          FILES: ${{ steps.files.outputs.files }}
+          ADDED: ${{ steps.impact.outputs.added }}
+          MODIFIED: ${{ steps.impact.outputs.modified }}
+          DELETED: ${{ steps.impact.outputs.deleted }}
+          RENAMED: ${{ steps.impact.outputs.renamed }}
+          STATS: ${{ steps.impact.outputs.stats }}
+          TESTS: ${{ steps.impact.outputs.tests }}
+          CONFIGS: ${{ steps.impact.outputs.configs }}
         run: |
-          # Prepare the prompt
-          cat > /tmp/prompt.txt << 'PROMPT_EOF'
-          You are a senior software engineer reviewing a pull request. Generate a comprehensive PR description based on the following information.
+          python3 -c "
+import os, json, urllib.request
+api_key = os.environ['JUSPAY_API_KEY']
+pr_title = os.environ.get('PR_TITLE', '')
+pr_branch = os.environ.get('PR_BRANCH', '')
+base_branch = os.environ.get('BASE_BRANCH', '')
+commits = os.environ.get('COMMITS', '')
+files = os.environ.get('FILES', '')
+added = os.environ.get('ADDED', '0')
+modified = os.environ.get('MODIFIED', '0')
+deleted = os.environ.get('DELETED', '0')
+renamed = os.environ.get('RENAMED', '0')
+stats = os.environ.get('STATS', '')
+tests = os.environ.get('TESTS', '0')
+configs = os.environ.get('CONFIGS', '0')
 
-          PR Title: ${{ steps.pr-info.outputs.title }}
-          Branch: ${{ steps.pr-info.outputs.branch }}
-          Target Branch: ${{ steps.pr-info.outputs.base_branch }}
+prompt = f'''You are a senior software engineer reviewing a pull request. Generate a comprehensive PR description.
 
-          Commits:
-          ${{ steps.commits.outputs.commits }}
+PR Title: {pr_title}
+Branch: {pr_branch} -> {base_branch}
+Changed Files: {added} added, {modified} modified, {deleted} deleted, {renamed} renamed
+Tests: {tests}, Configs: {configs}
+Stats: {stats}
 
-          Changed Files Summary:
-          - Added: ${{ steps.impact.outputs.added }} files
-          - Modified: ${{ steps.impact.outputs.modified }} files
-          - Deleted: ${{ steps.impact.outputs.deleted }} files
-          - Renamed: ${{ steps.impact.outputs.renamed }} files
-          - Test files: ${{ steps.impact.outputs.tests }}
-          - Config files: ${{ steps.impact.outputs.configs }}
+Commits:
+{commits}
 
-          File Statistics: ${{ steps.impact.outputs.stats }}
+Files:
+{files}
 
-          File List:
-          ${{ steps.files.outputs.files }}
+Generate PR description with: Summary, Changes Made, Files Changed, Impact Assessment, Testing, Checklist.
+Format as clean Markdown.'''
 
-          Generate a PR description with the following sections:
+data = {'model': 'open-large', 'messages': [{'role': 'system', 'content': 'You are a helpful assistant that generates clear, concise pull request descriptions.'}, {'role': 'user', 'content': prompt}], 'temperature': 0.3, 'max_tokens': 2000}
+req = urllib.request.Request('https://grid.ai.juspay.net/v1/chat/completions', data=json.dumps(data).encode(), headers={'Authorization': f'Bearer {api_key}', 'Content-Type': 'application/json'}, method='POST')
+try:
+    with urllib.request.urlopen(req) as resp:
+        result = json.loads(resp.read().decode())
+        description = result.get('choices', [{}])[0].get('message', {}).get('content', '')
+        if not description:
+            raise Exception('Empty response')
+except Exception as e:
+    description = f'## Summary\nThis PR includes changes to {modified} files.\n\n## Changes\n{commits}\n\n*AI unavailable: {str(e)}*'
 
-          ## Summary
-          Brief overview of what this PR accomplishes (2-3 sentences)
-
-          ## Changes Made
-          Bullet points of key changes
-
-          ## Files Changed
-          Categorize changes (New Features, Bug Fixes, Refactoring, Tests, Config/Build, Documentation)
-
-          ## Impact Assessment
-          - Risk Level: (Low/Medium/High) with brief justification
-          - Areas Affected: (list components/modules affected)
-          - Breaking Changes: (Yes/No - explain if yes)
-
-          ## Testing
-          What testing was done
-
-          ## Checklist
-          - [ ] Code follows project style guidelines
-          - [ ] Self-review completed
-          - [ ] Changes are well-documented
-          - [ ] Tests added/updated
-
-          Format as clean Markdown without code block wrappers.
-          PROMPT_EOF
-
-          # Call Juspay API
-          prompt_content=$(cat /tmp/prompt.txt | jq -Rs '.')
-          
-          response=$(curl -s -X POST "https://grid.ai.juspay.net/v1/chat/completions" \
-            -H "Authorization: Bearer $JUSPAY_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "{
-              \"model\": \"open-large\",
-              \"messages\": [
-                {
-                  \"role\": \"system\",
-                  \"content\": \"You are a helpful assistant that generates clear, concise pull request descriptions.\"
-                },
-                {
-                  \"role\": \"user\",
-                  \"content\": $prompt_content
-                }
-              ],
-              \"temperature\": 0.3,
-              \"max_tokens\": 2000
-            }")
-
-          # Extract description from response (adjust based on your API response format)
-          description=$(echo "$response" | jq -r '.choices[0].message.content // .response // .text' 2>/dev/null || echo "")
-          
-          # Fallback if AI fails
-          if [ -z "$description" ] || [ "$description" = "null" ]; then
-            description="## Summary\nThis PR includes changes to ${{ steps.impact.outputs.modified }} files with ${{ steps.impact.outputs.stats }}.\n\n## Changes\n${{ steps.commits.outputs.commits }}\n\n*Auto-generated description - AI model unavailable*"
-          fi
-
-          # Save to output
-          echo "description<<EOF" >> $GITHUB_OUTPUT
-          echo "$description" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+with open('/tmp/ai_description.txt', 'w') as f:
+    f.write(description)
+"
 
       - name: Update PR Description
         uses: actions/github-script@v7
         with:
           script: |
-            const description = `${{ steps.ai-desc.outputs.description }}`;
-            
-            // Get current description
+            const fs = require('fs');
+            const description = fs.readFileSync('/tmp/ai_description.txt', 'utf8');
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number
             });
-            
-            // Combine with existing description if it has content
             let finalDescription = description;
             if (pr.body && pr.body.trim() !== '' && !pr.body.includes('Auto-generated')) {
-              finalDescription = `## Original Description\n\n${pr.body}\n\n---\n\n${description}`;
+              finalDescription = '## Original Description\n\n' + pr.body + '\n\n---\n\n' + description;
             }
-            
-            // Update PR
             await github.rest.pulls.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
               pull_number: context.issue.number,
               body: finalDescription
             });
-            
             console.log('PR description updated successfully');
